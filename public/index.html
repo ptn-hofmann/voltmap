@@ -1,0 +1,904 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="initial-scale=1,user-scalable=no,maximum-scale=1,width=device-width">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <link rel="stylesheet" href="css/leaflet.css">
+        <link rel="stylesheet" href="css/qgis2web.css"><link rel="stylesheet" href="css/fontawesome-all.min.css">
+        <style>
+        html, body, #map {
+            width: 100%;
+            height: 100%;
+            padding: 0;
+            margin: 0;
+        }
+
+        /* Loading circle */
+        .loader {
+            border: 16px solid #f3f3f3;
+            border-radius: 50%;
+            border-top: 16px solid #502379;
+            width: 120px;
+            height: 120px;
+            -webkit-animation: spin 2s linear infinite; /* Safari */
+            animation: spin 2s linear infinite;
+
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            margin-top: -76px;
+            margin-left: -76px;
+        }
+
+        /* Safari */
+        @-webkit-keyframes spin {
+            0% { -webkit-transform: rotate(0deg); }
+            100% { -webkit-transform: rotate(360deg); }
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        </style>
+        <title></title>
+    </head>
+    <body>
+        <div id="map">
+        </div>
+        <div class="loader"></div>
+        <script src="js/qgis2web_expressions.js"></script>
+        <script src="js/leaflet.js"></script>
+        <script src="js/leaflet.rotatedMarker.js"></script>
+        <script src="js/leaflet.pattern.js"></script>
+        <script src="js/leaflet-hash.js"></script>
+        <script src="js/Autolinker.min.js"></script>
+        <script src="js/rbush.min.js"></script>
+        <script src="js/labelgun.min.js"></script>
+        <script src="js/labels.js"></script>
+        <script src="js/QuadTree.js"></script>
+        <script src="js/L.GridLayer.MaskCanvas.js"></script>  
+        <script src="js/topojson.min.js"></script>  
+        <script src="data/plzgebiete_einwohner.js"></script>
+        <script src="data/landesgrenzen.js"></script>
+        <script src="data/wahlkreise.js"></script>
+        <script>
+
+        // initiate loader
+        const preloader = document.querySelector('.loader');
+
+        // set bounds
+        var southWest = L.latLng(20, -21), //southwest border of map
+            northEast = L.latLng(72, 45),  //northeast border of map
+            bounds = L.latLngBounds(southWest, northEast);
+
+        // initiate leaflet map
+        var map = L.map('map', {
+            center: [51.2,10.327], // center of map
+            zoomControl:true, 
+            maxZoom:28,
+            maxBounds: bounds, 
+            zoom: 6,
+            minZoom: 5,
+        })
+        var hash = new L.Hash(map);
+        map.attributionControl.setPrefix('<a href="https://leafletjs.com" title="A JS library for interactive maps">Leaflet</a> &middot; <a href="https://qgis.org">QGIS</a>');
+        var autolinker = new Autolinker({truncate: {length: 30, location: 'smart'}});
+        var bounds_group = new L.featureGroup([]);
+
+        map.createPane('pane_OpenStreetMap_0');
+        map.getPane('pane_OpenStreetMap_0').style.zIndex = 400;
+        var layer_OpenStreetMap_0 = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            pane: 'pane_OpenStreetMap_0',
+            opacity: 1.0,
+            attribution: '',
+        });
+        layer_OpenStreetMap_0;
+        map.addLayer(layer_OpenStreetMap_0);
+
+        // extend Leaflet to create a GeoJSON layer from a TopoJSON file
+        L.TopoJSON = L.GeoJSON.extend({
+            addData: function (data) {
+            var geojson, key;
+            if (data.type === "Topology") {
+                for (key in data.objects) {
+                if (data.objects.hasOwnProperty(key)) {
+                    geojson = topojson.feature(data, data.objects[key]);
+                    L.GeoJSON.prototype.addData.call(this, geojson);
+                }
+                }
+                return this;
+            }
+            L.GeoJSON.prototype.addData.call(this, data);
+            return this;
+            }
+        });
+        L.topoJson = function (data, options) {
+            return new L.TopoJSON(data, options);
+        };
+
+        // Popup for PLZ Areas (Population)
+        function pop_plzgebiete_einwohner(feature, layer) {
+            if(feature.properties['plz_daten_einwohner'] && feature.properties['plz_daten_qkm'])
+            {   
+                // population density (Improvement: could be calculated before!)
+                var ratio = parseInt(parseFloat(feature.properties['plz_daten_einwohner'])/parseFloat(feature.properties['plz_daten_qkm']));
+                // population
+                var abs = new Intl.NumberFormat('de-DE').format(parseFloat(feature.properties['plz_daten_einwohner']));
+            }
+
+            var popupContent = '<table>\
+                    <tr>\
+                        <td colspan="2"><u>' + (feature.properties['note'] !== null ? autolinker.link(feature.properties['note'].toLocaleString()) : '') + '</u></td>\
+                    </tr>\
+                    <tr>\
+                        <td colspan="2">' + (feature.properties['plz_daten_einwohner'] !== null ? autolinker.link(abs.toLocaleString()) : '') + ' EinwohnerInnen</td>\
+                    </tr>\
+                    <tr>\
+                        <td colspan="2">' + (ratio !== null ? autolinker.link(ratio.toLocaleString()) : '') + ' EinwohnerInnen pro km2</td>\
+                    </tr>\
+                </table>';
+            layer.bindPopup(popupContent, {maxHeight: 400});
+        }
+
+        // Style for PLZ Areas (Population)
+        function style_plzgebiete_einwohner(feature) {
+            var einwohnerzahl = parseFloat(feature.properties['plz_daten_einwohner']);
+            if (einwohnerzahl >= 0.000000 && einwohnerzahl <= 2344.800000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohner_1',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.73)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(255,254,247,0.3)',
+                interactive: true,
+            }
+            }
+            if (einwohnerzahl >= 2344.800000 && einwohnerzahl <= 4804.800000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohner_1',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.73)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(253,220,184,0.3)',
+                interactive: true,
+            }
+            }
+            if (einwohnerzahl >= 4804.800000 && einwohnerzahl <= 9516.200000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohner_1',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.73)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(254,152,135,0.3)',
+                interactive: true,
+            }
+            }
+            if (einwohnerzahl >= 9516.200000 && einwohnerzahl <= 17249.200000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohner_1',
+                opacity: 1,
+                color: 'rgba(220,220,220,0.73)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(192,41,152,0.3)',
+                interactive: true,
+            }
+            }
+            if (einwohnerzahl >= 17249.200000 && einwohnerzahl <= 58826.000000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohner_1',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.73)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(82,34,131,0.3)',
+                interactive: true,
+            }
+            }
+        }
+        // add PLZ Areas (Population) to map
+        map.createPane('pane_plzgebiete_einwohner_1');
+        map.getPane('pane_plzgebiete_einwohner_1').style.zIndex = 401;
+        map.getPane('pane_plzgebiete_einwohner_1').style['mix-blend-mode'] = 'normal';
+        var layer_plzgebiete_einwohner_1 = L.topoJson(json_plzgebiete_einwohner, {
+            attribution: '',
+            interactive: true,
+            dataVar: 'json_plzgebiete_einwohner',
+            layerName: 'layer_plzgebiete_einwohner_1',
+            pane: 'pane_plzgebiete_einwohner_1',
+            onEachFeature: pop_plzgebiete_einwohner,
+            style: style_plzgebiete_einwohner,
+        });
+        bounds_group.addLayer(layer_plzgebiete_einwohner_1);
+        map.addLayer(layer_plzgebiete_einwohner_1);
+
+        // Popup for PLZ Areas (Population Density)
+        function pop_plzgebiete_einwohnerdichte(feature, layer) {
+            if(feature.properties['plz_daten_einwohner'] && feature.properties['plz_daten_qkm'])
+            {
+                var ratio = parseInt(parseFloat(feature.properties['plz_daten_einwohner'])/parseFloat(feature.properties['plz_daten_qkm']));
+                var abs = new Intl.NumberFormat('de-DE').format(parseFloat(feature.properties['plz_daten_einwohner']));
+            }
+
+            var popupContent = '<table>\
+                    <tr>\
+                        <td colspan="2"><u>' + (feature.properties['note'] !== null ? autolinker.link(feature.properties['note'].toLocaleString()) : '') + '</u></td>\
+                    </tr>\
+                    <tr>\
+                        <td colspan="2">' + (feature.properties['plz_daten_einwohner'] !== null ? autolinker.link(abs.toLocaleString()) : '') + ' EinwohnerInnen</td>\
+                    </tr>\
+                    <tr>\
+                        <td colspan="2">' + (ratio !== null ? autolinker.link(ratio.toLocaleString()) : '') + ' EinwohnerInnen pro km2</td>\
+                    </tr>\
+                </table>';
+            layer.bindPopup(popupContent, {maxHeight: 400});
+        }
+
+        // Style for PLZ Areas (Population Density)
+        function style_plzgebiete_einwohnerdichte(feature) {
+            // Improvement: could be done in the data!
+            var einwohnerdichte = parseFloat(feature.properties['plz_daten_einwohner'])/parseFloat(feature.properties['plz_daten_qkm']);
+            if (einwohnerdichte >= 0.000000 && einwohnerdichte <= 72.000000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohnerdichte_2',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.55)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(255,254,247,0.3)',
+                interactive: true,
+            }
+            }
+            if (einwohnerdichte >= 72.000000 && einwohnerdichte <= 125.000000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohnerdichte_2',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.55)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(253,220,184,0.4)',
+                interactive: true,
+            }
+            }
+            if (einwohnerdichte >= 125.000000 && einwohnerdichte <= 240.000000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohnerdichte_2',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.55)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(254,152,135,0.3)',
+                interactive: true,
+            }
+            }
+            if (einwohnerdichte >= 240.000000 && einwohnerdichte <= 800.000000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohnerdichte_2',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.55)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(192,42,152,0.3)',
+                interactive: true,
+            }
+            }
+            if (einwohnerdichte >= 800.000000 && einwohnerdichte <= 26719.000000 ) {
+                return {
+                pane: 'pane_plzgebiete_einwohnerdichte_2',
+                opacity: 1,
+                color: 'rgba(35,35,35,0.55)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(82,34,131,0.3)',
+                interactive: true,
+            }
+            }
+        }
+        // add PLZ Areas (Population Density) to map
+        map.createPane('pane_plzgebiete_einwohnerdichte_2');
+        map.getPane('pane_plzgebiete_einwohnerdichte_2').style.zIndex = 402;
+        map.getPane('pane_plzgebiete_einwohnerdichte_2').style['mix-blend-mode'] = 'normal';
+        var layer_plzgebiete_einwohnerdichte_2 = L.topoJson(json_plzgebiete_einwohner, {
+            attribution: '',
+            interactive: true,
+            dataVar: 'json_plzgebiete_einwohner',
+            layerName: 'layer_plzgebiete_einwohnerdichte_2',
+            pane: 'pane_plzgebiete_einwohnerdichte_2',
+            onEachFeature: pop_plzgebiete_einwohnerdichte,
+            style: style_plzgebiete_einwohnerdichte,
+        });
+        bounds_group.addLayer(layer_plzgebiete_einwohnerdichte_2);
+
+        // Style for Landesgrenzen
+        function style_landesgrenzen(feature) {
+            switch(String(feature.properties['GEN'])) {
+                case 'Baden-Württemberg':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.6)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Bayern':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.6)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Berlin':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Brandenburg':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Bremen':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Hamburg':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Hessen':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Mecklenburg-Vorpommern':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Niedersachsen':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Nordrhein-Westfalen':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Rheinland-Pfalz':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Saarland':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Sachsen':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Sachsen-Anhalt':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Schleswig-Holstein':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case 'Thüringen':
+                    return {
+                pane: 'pane_landesgrenzen',
+                opacity: 1,
+                color: 'rgba(0,0,0,0.4)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 4.0,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+            }
+        }
+        // add Landesgrenzen to map
+        map.createPane('pane_landesgrenzen');
+        map.getPane('pane_landesgrenzen').style.zIndex = 404;
+        map.getPane('pane_landesgrenzen').style['mix-blend-mode'] = 'normal';
+        var layer_landesgrenzen = new L.topoJson(json_landesgrenzen, {
+            attribution: '',
+            interactive: true,
+            dataVar: 'json_landesgrenzen',
+            layerName: 'layer_landesgrenzen',
+            pane: 'pane_landesgrenzen',
+            style: style_landesgrenzen,
+        });
+        bounds_group.addLayer(layer_landesgrenzen);
+        map.addLayer(layer_landesgrenzen);
+
+        // Style for Wahlkreise
+        function style_wahlkreise(feature) {
+            switch(String(feature.properties['LAND_NR'])) {
+                case '01':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '02':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '03':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '04':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '05':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '06':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '07':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '08':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '09':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '10':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '11':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '12':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '13':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '14':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '15':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+                case '16':
+                    return {
+                pane: 'pane_wahlkreise',
+                opacity: 1,
+                color: 'rgba(74,74,255,0.7)',
+                dashArray: '',
+                lineCap: 'square',
+                lineJoin: 'bevel',
+                weight: 3.2,
+                fillOpacity: 0,
+                interactive: false,
+                pointerEvents: 'none',
+            }
+                    break;
+            }
+        }
+        // add Wahlkreise to map
+        map.createPane('pane_wahlkreise');
+        map.getPane('pane_wahlkreise').style.zIndex = 403;
+        map.getPane('pane_wahlkreise').style['mix-blend-mode'] = 'normal';
+        var layer_wahlkreise = L.topoJson(json_wahlkreise, {
+            attribution: '',
+            interactive: false,
+            dataVar: 'json_wahlkreise',
+            layerName: 'layer_wahlkreise',
+            pane: 'pane_wahlkreise',
+            style: style_wahlkreise,
+        });
+        bounds_group.addLayer(layer_wahlkreise);
+        map.addLayer(layer_wahlkreise);
+
+        // set layer control 
+        var emptyLayer =  L.tileLayer('');
+        var baseMaps = { 
+        ' Keine Auswahl': emptyLayer,
+        ' Bevölkerung <br /><table><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohner_1_023450.png" /></td><td>0 - 2.300</td></tr><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohner_1_234548051.png" /></td><td>2.300 - 4.800</td></tr><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohner_1_480595162.png" /></td><td>4.800 - 9.500</td></tr><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohner_1_9516172493.png" /></td><td>9.500 - 17.000</td></tr><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohner_1_17249588264.png" /></td><td>17.000 - 60.000</td></tr></table>': layer_plzgebiete_einwohner_1,
+        ' Bevölkerungsdichte (EinwohnerInnen/km2)<br /><table><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohnerdichte_2_0720.png" /></td><td>0 - 70</td></tr><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohnerdichte_2_721251.png" /></td><td>70 - 130</td></tr><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohnerdichte_2_1252402.png" /></td><td>130 - 240</td></tr><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohnerdichte_2_2408003.png" /></td><td>240 - 800</td></tr><tr><td style="text-align: center;"><img src="legend/plzgebiete_einwohnerdichte_2_800267194.png" /></td><td>800 - 27.000</td></tr></table>': layer_plzgebiete_einwohnerdichte_2,
+        };
+        var overlayMaps = {
+        ' Wahlkreise <br />': layer_wahlkreise,
+        }
+        L.control.layers(baseMaps, overlayMaps,{collapsed:true}).addTo(map);
+
+        // set zoom function, that lets Wahlkreis tooltips disappear on low zoom level
+        map.on("zoomend", function(){
+            if (map.getZoom() >= 7) {
+                layer_wahlkreise.eachLayer(function (layer) {
+                    layer.openTooltip();
+                });
+            } else {
+                layer_wahlkreise.eachLayer(function (layer) {
+                    layer.closeTooltip();
+                });
+            }
+        });
+
+        // set click function, that additionally adds Wahlkreis name next to its number when clicking on tooltip
+        var i = 0;
+        layer_wahlkreise.eachLayer(function(layer) {
+            var context = {
+                feature: layer.feature,
+                variables: {}
+            };
+            var tooltip = L.tooltip ({permanent: true, interactive: true, direction: 'center', offset: [0, 0], className: 'css_wahlkreise'})
+                .setContent(exp_label_wahlkreise_eval_expression(context) !== null?String('<div style="color: #000000; font-size: 9pt; font-family: \'Ubuntu\', sans-serif; background: rgba(255, 255, 255, 1); border-radius: 6px; padding: 5px; opacity: 0.98;">' + exp_label_wahlkreise_eval_expression(context)) + '</div>':'')
+                .closeTooltip ();
+            layer.bindTooltip(tooltip);
+            var el = tooltip.getElement();
+            el.addEventListener('click', function() {
+                el.innerHTML = String('<div style="color: #000000; font-size: 9pt; font-family: \'Ubuntu\', sans-serif; background: rgba(255, 255, 255, 1); border-radius: 6px; padding: 5px; opacity: 0.98;">' + exp_label_wahlkreise_eval_expression2(context) + '</div>')
+            });
+            el.addEventListener('mouseout', function() {
+                el.innerHTML = String('<div style="color: #000000; font-size: 9pt; font-family: \'Ubuntu\', sans-serif; background: rgba(255, 255, 255, 1); border-radius: 6px; padding: 5px; opacity: 0.98;">' + exp_label_wahlkreise_eval_expression(context) + '</div>')
+            });
+            labels.push(layer);
+            totalMarkers += 1;
+              layer.added = true;
+              addLabel(layer, i);
+              i++;
+        });
+        layer_wahlkreise.eachLayer(function (layer) {
+                    layer.closeTooltip();
+                });
+        
+        // for better performance, not sure if this helps
+        map.options.preferCanvas = true;
+        </script>
+    </body>
+</html>
