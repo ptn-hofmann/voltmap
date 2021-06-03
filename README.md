@@ -9,6 +9,7 @@ How to add new data:
 - Merge data
 - Export layer as GeoJSON
 - Convert GeoJSON to TopoJSON
+- Hard-code TopoJSON into corresponding JS script
 
 Useful Links:
 - https://mapshaper.org/ for downsizing resolution and converting
